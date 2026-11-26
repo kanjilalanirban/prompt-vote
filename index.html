@@ -58,9 +58,14 @@
 
 <script>
 const API = "https://abacus.jasoncameron.dev";
-const NS = "promptvote-46688e278564";
-// Admin keys let this page reset the counters. Anyone with the page can read them.
-const KEYS = {"round":"4fc3c7ae-5dde-41c1-9d37-f719948a615f","q1y":"d324c5cb-4e7e-4284-b1c0-539713cdd1d4","q1n":"fb9e0aeb-a0bc-4c3c-ad31-b2d580d866fb","q2y":"2e0e2781-428e-4d4e-94ea-e242fcbf92b0","q2n":"30775e63-39a2-4428-89c6-628ef4e010c3","q3y":"43f1d916-4763-4237-b95c-540d70ba3163","q3n":"20169e99-a45d-4186-92b8-f2b6e256f851","q4y":"8a173d01-4d20-4286-af83-b46df4710bbb","q4n":"e7ffa83a-8f26-451d-8daa-ee1bf2057792","q5y":"08c1428c-ea87-4b96-b18e-a3fd3f019ebb","q5n":"a384624f-9e38-4b12-a65c-2007f55432a6","q6y":"225c916d-e4c7-44bc-b53d-0b8cd3b8e886","q6n":"3dd45855-b6a7-403a-9345-2ac0e0e3a4f4"};
+const NS = "promptvote2-1eb34e10c019";
+// The 12 counts are packed into 3 counters to stay under the service's rate limit
+// (30 requests per 10s per IP; people on the same Wi-Fi share one IP).
+// Each counter = round*10^12 + [prompt A yes]*1 + [A no]*10^3 + [prompt B yes]*10^6 + [B no]*10^9.
+// Admin keys let this page add votes and reset. Anyone with the page can read them.
+const KEYS = {"group1":"4b1206b1-727c-45b3-91b3-178cc0176133","group2":"b05d142d-46d4-4945-b125-872f09d222a7","group3":"7d5a305d-a5fd-47f9-94a4-96045e5e7273"};
+const GROUPS = Object.keys(KEYS);
+const ROUND = 1e12;
 
 const PROMPTS = [
   "Review the promotion and tell me what to do.",
@@ -73,7 +78,8 @@ const PROMPTS = [
 
 const list = document.getElementById("list");
 const statusEl = document.getElementById("status");
-const counts = {};
+const groupValues = {};   // last successfully read value per counter
+let busy = false, failStreak = 0, timer = null;
 
 PROMPTS.forEach((text, i) => {
   const n = i + 1;
@@ -92,22 +98,61 @@ PROMPTS.forEach((text, i) => {
   list.appendChild(card);
 });
 
-async function get(key) {
-  const r = await fetch(`${API}/get/${NS}/${key}`, { cache: "no-store" });
-  if (!r.ok) return 0;
-  return (await r.json()).value ?? 0;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// Fetch JSON, retrying with backoff when rate-limited or the network blips.
+async function call(url, opts = {}, tries = 5) {
+  for (let i = 0; i < tries; i++) {
+    try {
+      const r = await fetch(url, { cache: "no-store", ...opts });
+      if (r.ok) return await r.json();
+      if (r.status !== 429 && r.status < 500) throw new Error("HTTP " + r.status);
+    } catch (e) {
+      if (i === tries - 1) throw e;
+    }
+    if (i < tries - 1) await sleep(1000 * 2 ** i + Math.random() * 1000);
+  }
+  throw new Error("Server busy");
+}
+
+function slot(n) {                 // which counter and multiplier hold prompt n's votes
+  const group = GROUPS[Math.ceil(n / 2) - 1];
+  const base = n % 2 === 1 ? 0 : 2;
+  return { group, y: 1000 ** base, n: 1000 ** (base + 1) };
+}
+
+function countOf(n, a) {
+  const s = slot(n), v = groupValues[s.group];
+  if (v === undefined) return null;
+  return Math.floor((v % ROUND) / s[a]) % 1000;
+}
+
+function currentRound() {
+  const vals = GROUPS.map(g => groupValues[g]).filter(v => v !== undefined);
+  return vals.length ? Math.max(...vals.map(v => Math.floor(v / ROUND))) : null;
 }
 
 function myVotes() {
-  return JSON.parse(localStorage.getItem("pv-votes") || "{}");
+  return JSON.parse(localStorage.getItem("pv2-votes") || "{}");
+}
+
+function syncRound() {
+  // A reset bumps the round; clear this browser's votes so people can vote again.
+  const r = currentRound();
+  if (r === null) return;
+  if (String(r) !== localStorage.getItem("pv2-round")) {
+    localStorage.setItem("pv2-round", String(r));
+    localStorage.removeItem("pv2-votes");
+  }
 }
 
 function render() {
   const votes = myVotes();
   for (let n = 1; n <= PROMPTS.length; n++) {
-    const y = counts[`q${n}y`] ?? 0, no = counts[`q${n}n`] ?? 0, total = y + no;
-    document.getElementById(`c${n}y`).textContent = y;
-    document.getElementById(`c${n}n`).textContent = no;
+    const y = countOf(n, "y"), no = countOf(n, "n");
+    const total = (y || 0) + (no || 0);
+    document.getElementById(`c${n}y`).textContent = y ?? "–";
+    document.getElementById(`c${n}n`).textContent = no ?? "–";
     document.getElementById(`b${n}y`).style.width = total ? (y / total * 100) + "%" : "0";
     document.getElementById(`b${n}n`).style.width = total ? (no / total * 100) + "%" : "0";
     document.querySelectorAll(`.vote[data-q="${n}"]`).forEach(b => {
@@ -118,40 +163,55 @@ function render() {
 }
 
 async function refresh() {
+  if (busy) return;
+  busy = true;
   statusEl.textContent = "Refreshing…";
   try {
-    const keys = Object.keys(KEYS);
-    const values = await Promise.all(keys.map(get));
-    keys.forEach((k, i) => counts[k] = values[i]);
-    // A reset bumps "round"; clear this browser's votes so people can vote again.
-    if (String(counts.round) !== localStorage.getItem("pv-round")) {
-      localStorage.setItem("pv-round", String(counts.round));
-      localStorage.removeItem("pv-votes");
-    }
+    const vals = await Promise.all(GROUPS.map(g => call(`${API}/get/${NS}/${g}`, {}, 3)));
+    GROUPS.forEach((g, i) => groupValues[g] = vals[i].value);
+    syncRound();
     render();
+    failStreak = 0;
     statusEl.textContent = "Updated " + new Date().toLocaleTimeString();
   } catch (e) {
-    statusEl.textContent = "Couldn't reach the vote server. Try Refresh.";
+    // Keep showing the last good counts; never replace them with zeros.
+    failStreak++;
+    statusEl.textContent = "Server busy — showing last counts, retrying shortly.";
+  } finally {
+    busy = false;
   }
+}
+
+function schedule() {
+  clearTimeout(timer);
+  // 20–30s, longer after failures; random spread so viewers don't all refresh at once.
+  const wait = (20000 + Math.random() * 10000) * Math.min(2 ** failStreak, 6);
+  timer = setTimeout(async () => {
+    if (!document.hidden) await refresh();
+    schedule();
+  }, wait);
 }
 
 list.addEventListener("click", async e => {
   const b = e.target.closest(".vote");
   if (!b || b.disabled) return;
-  const n = b.dataset.q, a = b.dataset.a;
+  const n = b.dataset.q, a = b.dataset.a, s = slot(+n);
   const votes = myVotes();
   votes[n] = a;
-  localStorage.setItem("pv-votes", JSON.stringify(votes));
+  localStorage.setItem("pv2-votes", JSON.stringify(votes));
   render();
+  statusEl.textContent = "Saving vote…";
   try {
-    const r = await fetch(`${API}/hit/${NS}/q${n}${a}`, { cache: "no-store" });
-    counts[`q${n}${a}`] = (await r.json()).value;
+    const r = await call(`${API}/update/${NS}/${s.group}?value=${s[a]}`,
+      { method: "POST", headers: { Authorization: `Bearer ${KEYS[s.group]}` } }, 6);
+    groupValues[s.group] = r.value;
     render();
+    statusEl.textContent = "Vote saved.";
   } catch (err) {
     delete votes[n];
-    localStorage.setItem("pv-votes", JSON.stringify(votes));
+    localStorage.setItem("pv2-votes", JSON.stringify(votes));
     render();
-    statusEl.textContent = "Vote didn't go through. Please try again.";
+    statusEl.textContent = "Server busy — vote not saved. Please try again in a few seconds.";
   }
 });
 
@@ -161,18 +221,23 @@ document.getElementById("reset").addEventListener("click", async () => {
   if (!confirm("Reset all vote counts to zero for everyone?")) return;
   statusEl.textContent = "Resetting…";
   try {
-    await Promise.all(Object.keys(KEYS).filter(k => k !== "round").map(k =>
-      fetch(`${API}/reset/${NS}/${k}`, { method: "POST", headers: { Authorization: `Bearer ${KEYS[k]}` } })));
-    await fetch(`${API}/hit/${NS}/round`, { cache: "no-store" });
-    await refresh();
+    const vals = await Promise.all(GROUPS.map(g => call(`${API}/get/${NS}/${g}`)));
+    const next = Math.max(...vals.map(v => Math.floor(v.value / ROUND))) + 1;
+    await Promise.all(GROUPS.map(g => call(`${API}/set/${NS}/${g}?value=${next * ROUND}`,
+      { method: "POST", headers: { Authorization: `Bearer ${KEYS[g]}` } })));
+    GROUPS.forEach(g => groupValues[g] = next * ROUND);
+    syncRound();
+    render();
     statusEl.textContent = "Counts reset at " + new Date().toLocaleTimeString();
   } catch (e) {
-    statusEl.textContent = "Reset failed. Please try again.";
+    statusEl.textContent = "Reset didn't finish (server busy). Please press Reset again.";
   }
 });
 
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+
 refresh();
-setInterval(refresh, 15000);
+schedule();
 </script>
 </body>
 </html>
