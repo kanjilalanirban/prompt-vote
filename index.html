@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prompt Vote</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #fff; --ink: #1f2430; --muted: #6b7280;
+    --line: #e5e7eb; --accent: #4a6fc1; --yes: #1f9d55; --no: #d64545;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         background: var(--bg); color: var(--ink); }
+  header { max-width: 880px; margin: 0 auto; padding: 32px 20px 8px;
+           display: flex; flex-wrap: wrap; gap: 12px; align-items: end; justify-content: space-between; }
+  h1 { margin: 0; font-size: 1.6rem; }
+  header p { margin: 4px 0 0; color: var(--muted); }
+  .toolbar { display: flex; gap: 8px; }
+  .toolbar button { border: 1px solid var(--line); background: var(--card); color: var(--ink);
+                    padding: 8px 14px; border-radius: 8px; font-size: .95rem; cursor: pointer; }
+  .toolbar button:hover { border-color: var(--accent); }
+  .toolbar #reset { color: var(--no); }
+  .toolbar #reset:hover { border-color: var(--no); }
+  main { max-width: 880px; margin: 0 auto; padding: 12px 20px 40px; display: grid; gap: 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; }
+  .q { display: flex; gap: 14px; }
+  .num { color: var(--accent); font-weight: 700; font-size: 1.3rem; min-width: 1.2em; }
+  .text { font-style: italic; line-height: 1.5; margin: 0; }
+  .row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 14px; padding-left: 34px; }
+  .vote { border: 1.5px solid; background: transparent; padding: 7px 18px; border-radius: 999px;
+          font-weight: 600; cursor: pointer; font-size: .95rem; }
+  .vote.yes { color: var(--yes); border-color: var(--yes); }
+  .vote.no  { color: var(--no);  border-color: var(--no); }
+  .vote.yes.chosen { background: var(--yes); color: #fff; }
+  .vote.no.chosen  { background: var(--no);  color: #fff; }
+  .vote:disabled:not(.chosen) { opacity: .4; cursor: default; }
+  .count { font-variant-numeric: tabular-nums; font-weight: 600; min-width: 2ch; }
+  .bar { flex: 1 1 160px; height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; display: flex; }
+  .bar span { display: block; height: 100%; transition: width .3s; }
+  .bar .y { background: var(--yes); } .bar .n { background: var(--no); }
+  .status { color: var(--muted); font-size: .85rem; max-width: 880px; margin: 0 auto; padding: 0 20px; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Prompt Vote</h1>
+    <p>Vote Yes or No on each prompt. One vote per prompt per browser.</p>
+  </div>
+  <div class="toolbar">
+    <button id="refresh" type="button">↻ Refresh</button>
+    <button id="reset" type="button">Reset counts</button>
+  </div>
+</header>
+<p class="status" id="status">Loading…</p>
+<main id="list"></main>
+
+<script>
+const API = "https://abacus.jasoncameron.dev";
+const NS = "promptvote-46688e278564";
+// Admin keys let this page reset the counters. Anyone with the page can read them.
+const KEYS = {"round":"4fc3c7ae-5dde-41c1-9d37-f719948a615f","q1y":"d324c5cb-4e7e-4284-b1c0-539713cdd1d4","q1n":"fb9e0aeb-a0bc-4c3c-ad31-b2d580d866fb","q2y":"2e0e2781-428e-4d4e-94ea-e242fcbf92b0","q2n":"30775e63-39a2-4428-89c6-628ef4e010c3","q3y":"43f1d916-4763-4237-b95c-540d70ba3163","q3n":"20169e99-a45d-4186-92b8-f2b6e256f851","q4y":"8a173d01-4d20-4286-af83-b46df4710bbb","q4n":"e7ffa83a-8f26-451d-8daa-ee1bf2057792","q5y":"08c1428c-ea87-4b96-b18e-a3fd3f019ebb","q5n":"a384624f-9e38-4b12-a65c-2007f55432a6","q6y":"225c916d-e4c7-44bc-b53d-0b8cd3b8e886","q6n":"3dd45855-b6a7-403a-9345-2ac0e0e3a4f4"};
+
+const PROMPTS = [
+  "Review the promotion and tell me what to do.",
+  "Summarize the sales data for the Toronto and Mississauga stores.",
+  "For the regional director, rank the stores by fall gap in $K and percent using only FallSales_2026.xlsx. Return a table with store, gap and gap %. Flag any gap worse than -10% and list missing data.",
+  "Write a short message to managers about the sales gap.",
+  "Using the four case files, write a recovery plan. Make reasonable assumptions.",
+  "Using only the four case files, write a one-page recovery brief for store managers: a summary, 3 to 5 actions with owner and due date, and risks. Keep it under 450 words and write Not stated for missing values."
+];
+
+const list = document.getElementById("list");
+const statusEl = document.getElementById("status");
+const counts = {};
+
+PROMPTS.forEach((text, i) => {
+  const n = i + 1;
+  const card = document.createElement("section");
+  card.className = "card";
+  card.innerHTML = `
+    <div class="q"><span class="num">${n}</span><p class="text"></p></div>
+    <div class="row">
+      <button class="vote yes" data-q="${n}" data-a="y" type="button">Yes</button>
+      <span class="count" id="c${n}y">–</span>
+      <button class="vote no" data-q="${n}" data-a="n" type="button">No</button>
+      <span class="count" id="c${n}n">–</span>
+      <div class="bar"><span class="y" id="b${n}y" style="width:0"></span><span class="n" id="b${n}n" style="width:0"></span></div>
+    </div>`;
+  card.querySelector(".text").textContent = text;
+  list.appendChild(card);
+});
+
+async function get(key) {
+  const r = await fetch(`${API}/get/${NS}/${key}`, { cache: "no-store" });
+  if (!r.ok) return 0;
+  return (await r.json()).value ?? 0;
+}
+
+function myVotes() {
+  return JSON.parse(localStorage.getItem("pv-votes") || "{}");
+}
+
+function render() {
+  const votes = myVotes();
+  for (let n = 1; n <= PROMPTS.length; n++) {
+    const y = counts[`q${n}y`] ?? 0, no = counts[`q${n}n`] ?? 0, total = y + no;
+    document.getElementById(`c${n}y`).textContent = y;
+    document.getElementById(`c${n}n`).textContent = no;
+    document.getElementById(`b${n}y`).style.width = total ? (y / total * 100) + "%" : "0";
+    document.getElementById(`b${n}n`).style.width = total ? (no / total * 100) + "%" : "0";
+    document.querySelectorAll(`.vote[data-q="${n}"]`).forEach(b => {
+      b.disabled = !!votes[n];
+      b.classList.toggle("chosen", votes[n] === b.dataset.a);
+    });
+  }
+}
+
+async function refresh() {
+  statusEl.textContent = "Refreshing…";
+  try {
+    const keys = Object.keys(KEYS);
+    const values = await Promise.all(keys.map(get));
+    keys.forEach((k, i) => counts[k] = values[i]);
+    // A reset bumps "round"; clear this browser's votes so people can vote again.
+    if (String(counts.round) !== localStorage.getItem("pv-round")) {
+      localStorage.setItem("pv-round", String(counts.round));
+      localStorage.removeItem("pv-votes");
+    }
+    render();
+    statusEl.textContent = "Updated " + new Date().toLocaleTimeString();
+  } catch (e) {
+    statusEl.textContent = "Couldn't reach the vote server. Try Refresh.";
+  }
+}
+
+list.addEventListener("click", async e => {
+  const b = e.target.closest(".vote");
+  if (!b || b.disabled) return;
+  const n = b.dataset.q, a = b.dataset.a;
+  const votes = myVotes();
+  votes[n] = a;
+  localStorage.setItem("pv-votes", JSON.stringify(votes));
+  render();
+  try {
+    const r = await fetch(`${API}/hit/${NS}/q${n}${a}`, { cache: "no-store" });
+    counts[`q${n}${a}`] = (await r.json()).value;
+    render();
+  } catch (err) {
+    delete votes[n];
+    localStorage.setItem("pv-votes", JSON.stringify(votes));
+    render();
+    statusEl.textContent = "Vote didn't go through. Please try again.";
+  }
+});
+
+document.getElementById("refresh").addEventListener("click", refresh);
+
+document.getElementById("reset").addEventListener("click", async () => {
+  if (!confirm("Reset all vote counts to zero for everyone?")) return;
+  statusEl.textContent = "Resetting…";
+  try {
+    await Promise.all(Object.keys(KEYS).filter(k => k !== "round").map(k =>
+      fetch(`${API}/reset/${NS}/${k}`, { method: "POST", headers: { Authorization: `Bearer ${KEYS[k]}` } })));
+    await fetch(`${API}/hit/${NS}/round`, { cache: "no-store" });
+    await refresh();
+    statusEl.textContent = "Counts reset at " + new Date().toLocaleTimeString();
+  } catch (e) {
+    statusEl.textContent = "Reset failed. Please try again.";
+  }
+});
+
+refresh();
+setInterval(refresh, 15000);
+</script>
+</body>
+</html>
