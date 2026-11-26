@@ -17,9 +17,9 @@
   h1 { margin: 0; font-size: 1.6rem; }
   header p { margin: 4px 0 0; color: var(--muted); }
   .toolbar { display: flex; gap: 8px; }
-  .toolbar button { border: 1px solid var(--line); background: var(--card); color: var(--ink);
+  .toolbar .btn, .toolbar button { text-decoration: none; display: inline-block; border: 1px solid var(--line); background: var(--card); color: var(--ink);
                     padding: 8px 14px; border-radius: 8px; font-size: .95rem; cursor: pointer; }
-  .toolbar button:hover { border-color: var(--accent); }
+  .toolbar .btn:hover, .toolbar button:hover { border-color: var(--accent); }
   .toolbar #reset { color: var(--no); }
   .toolbar #reset:hover { border-color: var(--no); }
   main { max-width: 880px; margin: 0 auto; padding: 12px 20px 40px; display: grid; gap: 14px; }
@@ -49,6 +49,7 @@
     <p>Vote Yes or No on each prompt. One vote per prompt per browser.</p>
   </div>
   <div class="toolbar">
+    <a class="btn" href="answers.html">🔑 Answer key</a>
     <button id="refresh" type="button">↻ Refresh</button>
     <button id="reset" type="button">Reset counts</button>
   </div>
